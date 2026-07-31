@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 
 import aiomysql
 import redis.asyncio as redis
@@ -57,16 +58,22 @@ async def producer():
         await cur.execute(
             """
             SELECT concat(download_path,'/', name), created_at
-            FROM tweets
+            FROM files
             WHERE download_path IS NOT NULL
             """
         )
 
         count = 0
+        skipped = 0
 
         async for row in cur:
             try:
                 download_path, created_at = row
+                count += 1
+
+                if not os.path.exists(download_path):
+                    skipped += 1
+                    continue
 
                 payload = {
                     "download_path": download_path,
@@ -78,7 +85,6 @@ async def producer():
                     json.dumps(payload),
                 )
 
-                count += 1
 
                 if count % 10000 == 0:
                     qsize = await r.llen(QUEUE_NAME)
@@ -90,8 +96,9 @@ async def producer():
                     eta = time.strftime("%H:%M:%S", time.gmtime(eta))
 
                     logging.info(
-                        "Produced=%d queue=%d rate=%d eta=%s",
+                        "Produced=%d skipped=%d queue=%d rate=%d eta=%s",
                         count,
+                        skipped,
                         qsize,
                         rate,
                         eta,
@@ -103,8 +110,9 @@ async def producer():
     conn.close()
 
     logging.info(
-        "Producer finished. Total=%d",
+        "Producer finished. Total=%d skipped=%d",
         count,
+        skipped,
     )
 
 

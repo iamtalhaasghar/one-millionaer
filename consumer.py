@@ -27,8 +27,12 @@ QUEUE_NAME = "tweet_copy_queue"
 
 TOTAL_TWEETS = 2_683_941
 
+BATCH = 16
+
 
 DST_DIR = "/mnt/data/o365/sorted_tweets"
+
+_created_dirs = set()
 
 
 logging.basicConfig(
@@ -61,13 +65,16 @@ def copy_file(data):
         filename,
     )
 
-    os.makedirs(
-        os.path.dirname(dst),
-        exist_ok=True,
-    )
+    if dst_dir not in _created_dirs:
+        os.makedirs(
+            dst_dir,
+            exist_ok=True,
+        )
+        _created_dirs.add(dst_dir)
 
-    if os.path.exists(dst):
-        return "exists"
+    #if os.path.exists(dst):
+    #    return "exists"
+
 
     os.rename(
         src,
@@ -89,60 +96,84 @@ async def worker(worker_id, r, processed, start, executor):
 
     while True:
 
-        item = await r.blpop(
-            QUEUE_NAME,
-            timeout=0,
-        )
+        pipe = r.pipeline()
 
-        payload = json.loads(
-            item[1]
-        )
+        for _ in range(BATCH):
+            pipe.lpop(QUEUE_NAME)
 
-        processed_count = next(processed)
+        items = await pipe.execute()
 
-        try:
+        items = [
+            item
+            for item in items
+            if item is not None
+        ]
 
-            loop = asyncio.get_running_loop()
+        if not items:
+            await r.blpop(
+                QUEUE_NAME,
+                timeout=0,
+            )
+            continue
 
-            result = await loop.run_in_executor(
+        entries = []
+
+        for item in items:
+            payload = json.loads(item)
+            processed_count = next(processed)
+            entries.append(
+                (payload, processed_count)
+            )
+
+        loop = asyncio.get_running_loop()
+
+        tasks = [
+            loop.run_in_executor(
                 executor,
                 copy_file,
                 payload,
             )
+            for payload, _ in entries
+        ]
 
-            if result == "copied":
+        results = await asyncio.gather(
+            *tasks,
+            return_exceptions=True,
+        )
+
+        for (payload, processed_count), result in zip(entries, results):
+
+            if isinstance(result, FileNotFoundError):
+                logging.warning(result)
+                missing += 1
+
+            elif isinstance(result, Exception):
+                logging.exception(
+                    "Worker %d failed %s",
+                    worker_id,
+                    payload["download_path"],
+                )
+
+            elif result == "copied":
                 copied += 1
 
-        except FileNotFoundError as e:
-            logging.warning(e)
-            missing += 1
+            if processed_count % 500 == 0:
 
-        except Exception:
+                elapsed = time.monotonic() - start
+                rate = processed_count / elapsed if elapsed else 0
+                remaining = TOTAL_TWEETS - processed_count
+                eta = remaining / rate if rate else 0
+                eta = time.strftime("%H:%M:%S", time.gmtime(eta))
 
-            logging.exception(
-                "Worker %d failed %s",
-                worker_id,
-                payload["download_path"],
-            )
-
-
-        if processed_count % 500 == 0:
-
-            elapsed = time.monotonic() - start
-            rate = processed_count / elapsed if elapsed else 0
-            remaining = TOTAL_TWEETS - processed_count
-            eta = remaining / rate if rate else 0
-            eta = time.strftime("%H:%M:%S", time.gmtime(eta))
-
-            logging.info(
-                "Worker=%d processed=%d copied=%d missing=%d rate=%d eta=%s",
-                worker_id,
-                processed_count,
-                copied,
-                missing,
-                rate,
-                eta,
-            )
+                logging.info(
+                    "Worker=%d processed=%d copied=%d missing=%d rate=%d eta=%s",
+                    worker_id,
+                    processed_count,
+                    copied,
+                    missing,
+                    rate,
+                    eta,
+                )
 
 
 async def main(workers):
@@ -150,7 +181,7 @@ async def main(workers):
     r = redis.Redis(**REDIS)
 
     executor = ThreadPoolExecutor(
-        max_workers=workers,
+        max_workers=workers * BATCH,
     )
 
     start = time.monotonic()
