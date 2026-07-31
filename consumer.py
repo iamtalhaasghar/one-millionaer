@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import redis.asyncio as redis
 
@@ -76,7 +77,7 @@ def copy_file(data):
     return "copied"
 
 
-async def worker(worker_id, r, processed, start):
+async def worker(worker_id, r, processed, start, executor):
 
     copied = 0
     missing = 0
@@ -101,7 +102,10 @@ async def worker(worker_id, r, processed, start):
 
         try:
 
-            result = await asyncio.to_thread(
+            loop = asyncio.get_running_loop()
+
+            result = await loop.run_in_executor(
+                executor,
                 copy_file,
                 payload,
             )
@@ -145,6 +149,10 @@ async def main(workers):
 
     r = redis.Redis(**REDIS)
 
+    executor = ThreadPoolExecutor(
+        max_workers=workers,
+    )
+
     start = time.monotonic()
     processed = itertools.count()
 
@@ -159,13 +167,18 @@ async def main(workers):
                     r,
                     processed,
                     start,
+                    executor,
                 )
             )
         )
 
-    await asyncio.gather(
-        *tasks
-    )
+    try:
+        await asyncio.gather(
+            *tasks
+        )
+    finally:
+        executor.shutdown()
+        await r.aclose()
 
 
 if __name__ == "__main__":
@@ -175,7 +188,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--workers",
         type=int,
-        default=16,
+        default=8,
     )
 
     args = parser.parse_args()
