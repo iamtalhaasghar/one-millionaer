@@ -39,6 +39,8 @@ logging.basicConfig(
 
 async def producer():
 
+    start = time.monotonic()
+
     r = redis.Redis(**REDIS)
 
     logging.info("Connecting to MySQL")
@@ -81,10 +83,18 @@ async def producer():
                 if count % 10000 == 0:
                     qsize = await r.llen(QUEUE_NAME)
 
+                    elapsed = time.monotonic() - start
+                    rate = count / elapsed if elapsed else 0
+                    remaining = TOTAL_TWEETS - count
+                    eta = remaining / rate if rate else 0
+                    eta = time.strftime("%H:%M:%S", time.gmtime(eta))
+
                     logging.info(
-                        "Produced=%d queue=%d",
+                        "Produced=%d queue=%d rate=%d eta=%s",
                         count,
                         qsize,
+                        rate,
+                        eta,
                     )
             except Exception as e:
                 logging.exception(e)

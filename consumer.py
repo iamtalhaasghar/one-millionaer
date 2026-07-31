@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import itertools
 import json
 import logging
 import os
@@ -22,6 +23,8 @@ REDIS = {
 }
 
 QUEUE_NAME = "tweet_copy_queue"
+
+TOTAL_TWEETS = 2_683_941
 
 
 DST_DIR = "/mnt/data/o365/sorted_tweets"
@@ -73,9 +76,8 @@ def copy_file(data):
     return "copied"
 
 
-async def worker(worker_id, r):
+async def worker(worker_id, r, processed, start):
 
-    processed = 0
     copied = 0
     missing = 0
 
@@ -95,7 +97,7 @@ async def worker(worker_id, r):
             item[1]
         )
 
-        processed += 1
+        processed_count = next(processed)
 
         try:
 
@@ -120,20 +122,31 @@ async def worker(worker_id, r):
             )
 
 
-        if processed % 100 == 0:
+        if processed_count % 500 == 0:
+
+            elapsed = time.monotonic() - start
+            rate = processed_count / elapsed if elapsed else 0
+            remaining = TOTAL_TWEETS - processed_count
+            eta = remaining / rate if rate else 0
+            eta = time.strftime("%H:%M:%S", time.gmtime(eta))
 
             logging.info(
-                "Worker=%d processed=%d copied=%d missing=%d",
+                "Worker=%d processed=%d copied=%d missing=%d rate=%d eta=%s",
                 worker_id,
-                processed,
+                processed_count,
                 copied,
                 missing,
+                rate,
+                eta,
             )
 
 
 async def main(workers):
 
     r = redis.Redis(**REDIS)
+
+    start = time.monotonic()
+    processed = itertools.count()
 
     tasks = []
 
@@ -144,6 +157,8 @@ async def main(workers):
                 worker(
                     i + 1,
                     r,
+                    processed,
+                    start,
                 )
             )
         )
