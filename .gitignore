@@ -9,3 +9,7 @@ test
 data_preprocessing/stats.txt
 Cleaned_data.csv
 roman_urdu_hate_speeh_lstm_akmal_abbas.keras
+/__pycache__
+/unique_words.dat
+/roman_urdu_words_used.dat
+/english_words_used.dat
